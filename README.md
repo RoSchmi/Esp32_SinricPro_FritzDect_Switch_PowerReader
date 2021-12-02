@@ -6,6 +6,7 @@ This is a more complex application which can be used to switch the power socket 
 
 A simple and easier to understand appliction which can only switch the Fritz!Dect 200 power socket is provided here:
 
+https://github.com/RoSchmi/Esp32_SinricPro_FritzDect_Controller
 
 This is work in progress, working but not yet thoroughly tested 
 
