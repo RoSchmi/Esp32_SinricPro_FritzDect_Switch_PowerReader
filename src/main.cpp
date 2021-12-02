@@ -1,4 +1,3 @@
-
 // Program 'Esp32_SinricPro_FritzDect_Controller'
 // Cpoyright RoSchmi 2021, License Apache 2.0
 
@@ -26,6 +25,7 @@
 #include "config.h"
 #include "SinricPro_Generic.h"
 #include "SinricProSwitch.h"
+#include "SinricProPowerSensor.h"
 
 #include "FreeRTOS.h"
 #include "Esp.h"
@@ -37,6 +37,7 @@
 
 #include "WiFiClient.h"
 #include "RsHttpFritzApi.h"
+#include "RsPowerMeasureMgr.h"
 
 // Default Esp32 stack size of 8192 byte is not enough for some applications.
 // --> configure stack size dynamically from code to 16384
@@ -46,6 +47,8 @@
 #if !(USING_DEFAULT_ARDUINO_LOOP_STACK_SIZE)
   uint16_t USER_CONFIG_ARDUINO_LOOP_STACK_SIZE = 16384;
 #endif
+
+
 
 RESET_REASON resetReason_0;
 RESET_REASON resetReason_1;
@@ -58,8 +61,13 @@ const char *password = IOT_CONFIG_WIFI_PASSWORD;
 // if a queue should be used to store commands see:
 //https://techtutorialsx.com/2017/08/20/esp32-arduino-freertos-queues/
 
+// Create more powerstate flags if needed
 bool powerState1 = false;
 bool powerState2 = false;
+
+// Create more instances if needed
+RsPowerMeasureMgr PowerMeasureMgr_1(POWERSENSOR_ID_1, FRITZ_DEVICE_AIN_01, SWITCH_READ_REPEAT_COUNT, POWER_MEASURE_READINTERVAL_MS);
+RsPowerMeasureMgr PowerMeasureMgr_2(POWERSENSOR_ID_2, FRITZ_DEVICE_AIN_02, SWITCH_READ_REPEAT_COUNT, POWER_MEASURE_READINTERVAL_MS);
 
 typedef struct
 {
@@ -68,11 +76,14 @@ typedef struct
 }ButtonState;
 
 //RoSchmi
+#define GPIOPin_16 16    // for debugging
 #define GPIOPin 0
 #define BUTTON_1 GPIOPin
 #define BUTTON_2 GPIOPin
 
 #define FlashButton GPIOPin
+
+bool GPIO_16_State = false;
 
 bool buttonPressed = false;
 
@@ -87,27 +98,32 @@ typedef struct
   // struct for the std::map below
   int relayPIN;
   int flipSwitchPIN;
+  bool hasPowerMeasure;
   int index;
 } deviceConfig_t;
 
 // Sinric Pro
 // this is the main configuration
-// please put in your deviceId, the PIN for Relay and PIN for flipSwitch and an index to address the entry
+// please put in your deviceId, the PIN for Relay the PIN for flipSwitch, a flag if powerMeasure available
+//  and an index to address the entry
 // this can be up to N devices...depending on how much pin's available on your device ;)
 // right now we have 2 devicesIds going to 1 LED and 2 flip switches (set to the same button)
+// set the LED to -1 for none
 
 std::map<String, deviceConfig_t> devices =
 {
-  //{deviceId, {relayPIN,  flipSwitchPIN, index}}
+  //{deviceId, {relayPIN,  flipSwitchPIN, measure flag, index}}
   // You have to set the pins correctly.
   // In this App we used -1 when the relay pin shall be ignored 
 
-  { SWITCH_ID_1, {  (int)LED1_PIN,  (int)BUTTON_1, 0}},
-  { SWITCH_ID_2, {  (int)-1, (int)BUTTON_2, 1}} 
+  { SWITCH_ID_1, {  (int)LED1_PIN,  (int)BUTTON_1, true, 0}},
+  { SWITCH_ID_2, {  (int)-1, (int)BUTTON_2, false, 1}}
 };
 
-uint32_t millisAtLastAction;
-uint32_t millisBetweenActions = 10000;
+//size_t switchCount = devices.size();
+
+uint32_t millisAtLastFritzConnectTest;
+uint32_t millisBetwFritzConnectTests = 10000;
 
 //X509Certificate myX509Certificate = baltimore_root_ca;
 X509Certificate myX509Certificate = myfritzbox_root_ca;
@@ -133,15 +149,100 @@ void GPIOPinISR()
   buttonPressed = true;
 }
 
+// this is where you read from power sensor
+bool doPowerMeasure(RsPowerMeasureMgr &actPowerMeasure) { 
+  if (actPowerMeasure.isActive())
+  {
+    actPowerMeasure.SetPower((float)fritz.getSwitchPower(actPowerMeasure.GetFritzDevice_AIN()));
+  }
+  else
+  {
+    actPowerMeasure.SetPower(nanf(""));
+  }
+  return true;
+}
+
+bool sendThisPowerSensorData(RsPowerMeasureMgr &powerMeasureMgr) 
+{ 
+  bool powerMeasureStateToggled = false;
+  if (!powerMeasureMgr.isSendForced())  // send if forced in any case
+  {
+    // dont send data if device is turned off or if powerMeasure is off
+    if (!(powerMeasureMgr.isActive() && powerMeasureMgr.GetPowerMeasureState()))
+    {
+      return false; 
+    }
+    // only send if sendinterval has elapsed
+    if ((millis() - powerMeasureMgr.GetLastSendTimeMs()) < powerMeasureMgr.GetSendIntervalMs()) 
+    {
+      return false; 
+    }
+  }
+  // Will be sent to Sinric Pro server
+  powerMeasureMgr.SetSendForced(false);
+  if (powerMeasureMgr.isAutoRepeatEnabled())
+  {    
+    powerMeasureMgr.DecrementAutoRepeatCounter(1000);
+    // RoSchmi
+    Serial.println("RepeatCounter");
+    Serial.println(powerMeasureMgr.GetAutoRepeatCounter());
+    if (powerMeasureMgr.GetAutoRepeatCounter() <= 0)
+    {
+      powerMeasureMgr.SetPowerMeasureState(false);
+      powerMeasureStateToggled = true;
+      powerMeasureMgr.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
+      Serial.println("RepeatCounter was Null");
+    }
+  }
+  else
+  {
+    powerMeasureMgr.SetSendForced(false);
+    powerMeasureMgr.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
+  }
+  
+  powerMeasureMgr.SetLastSendTimeMs(millis());
+  
+  // send measured data
+  SinricProPowerSensor &myPowerSensor = SinricPro[powerMeasureMgr.GetPowerSensor_ID()];
+  powerMeasure myPowerMeasure = powerMeasureMgr.GetPowerValues();
+
+  Serial.println("sendPowerSensorEvent happend");
+  // RoSchmi
+  GPIO_16_State = !GPIO_16_State;
+  digitalWrite(GPIOPin_16, GPIO_16_State);
+
+  Serial.println(myPowerMeasure.power);
+  
+  if (powerMeasureStateToggled)
+  {
+    myPowerSensor.sendPowerStateEvent(false);
+  }
+  
+  bool success = myPowerSensor.sendPowerSensorEvent(myPowerMeasure.voltage, myPowerMeasure.current, myPowerMeasure.power);
+  if (success) { 
+    doPowerMeasure(powerMeasureMgr); }
+  return success;
+}
+
+bool sendPowerSensorData() {
+  bool returnResult = false;
+  // Add more 
+  returnResult = returnResult || sendThisPowerSensorData(PowerMeasureMgr_1);
+  returnResult = returnResult || sendThisPowerSensorData(PowerMeasureMgr_2);
+  return returnResult;
+}
+
 // forward declarations
 void print_reset_reason(RESET_REASON reason);
 bool onPowerState(String deviceId, bool &state);
-bool onPowerState2(const String &deviceId, bool state);
 bool onPowerState1(const String &deviceId, bool state);
+bool onPowerState2(const String &deviceId, bool state);
+bool onPowerState3(const String &deviceId, bool state);
 void setupSinricPro(bool restoreStates);
 void handleButtonPress();
 
-void setup() {
+void setup() 
+{
   Serial.begin(BAUD_RATE);
   //while(!Serial);
 
@@ -149,6 +250,7 @@ void setup() {
   //attachInterrupt(FlashButton, GPIOPinISR, FALLING);  // not used
 
   pinMode(LED1_PIN, OUTPUT);
+  pinMode(GPIOPin_16, OUTPUT);
 
   // Wait some time (3000 ms)
   uint32_t start = millis();
@@ -213,16 +315,16 @@ void setup() {
   }
   WiFi.begin(ssid, password);
 
-if (!WiFi.enableSTA(true))
-{     
+  if (!WiFi.enableSTA(true))
+  {     
     Serial.println("Connect failed.");
     delay(10 * 1000);  // Reboot after 10 seconds
     ESP.restart(); 
-}
+  }
 
-#if WORK_WITH_WATCHDOG == 1
+  #if WORK_WITH_WATCHDOG == 1
       esp_task_wdt_reset();
-#endif 
+  #endif 
 
 // not tested
 #if USE_STATIC_IP == 1
@@ -269,10 +371,16 @@ if (!WiFi.enableSTA(true))
   // if true: when the device connects to the server the sever will
   // send the last states of the switch to the device
   // if false: the device will actualize the server to the state just beeing present on the device
+  
   bool restoreStatesFromServer = false;
   setupSinricPro(restoreStatesFromServer);
 
   delay(1000);
+
+  //SinricProPowerSensor &myPowerSensor = SinricPro[POWERSENSOR_ID_1];
+
+  // set callback function to device
+  //myPowerSensor.onPowerState(onPowerState);
 
   if (!restoreStatesFromServer)
   { 
@@ -288,8 +396,10 @@ if (!WiFi.enableSTA(true))
   }
   
   // Set time interval for repeating commands
-  millisAtLastAction = millis();
-  millisBetweenActions = 60 * 1000;  //to refresh fritz_SID every minute
+  millisAtLastFritzConnectTest = millis();
+  millisBetwFritzConnectTests = 60 * 1000;  //to refresh fritz_SID every minute
+
+  Serial.println("Ended Setup");
 }
 
 void loop() 
@@ -301,11 +411,10 @@ void loop()
       esp_task_wdt_reset();
     #endif
   }
-  if ((millis() - millisAtLastAction) > millisBetweenActions) // time interval expired?
+  if ((millis() - millisAtLastFritzConnectTest) > millisBetwFritzConnectTests) // time interval expired?
   {
-    
      //Serial.println(F("Testing SID"));
-     millisAtLastAction = millis();
+     millisAtLastFritzConnectTest = millis();
      if (fritz_SID != fritz.testSID())
      {
         if (fritz.init())
@@ -324,6 +433,7 @@ void loop()
      //Serial.printf("Name of device is: %s", switchname.c_str());
   }
   SinricPro.handle();
+  sendPowerSensorData();
   handleButtonPress();
 }
 
@@ -351,57 +461,86 @@ void handleButtonPress()
   }
 }
 
+
 bool onPowerState(String deviceId, bool &state)
 {
   bool returnResult = false;
-  //Serial.println( String(deviceId) + String(state ? " on" : " off")); 
-  switch (devices[deviceId].index)
+  Serial.println( String(deviceId) + String(state ? " on" : " off"));
+  
+ 
+  if (deviceId == POWERSENSOR_ID_1)
   {
-    case 0:
+    PowerMeasureMgr_1.SetPowerMeasureState(state);
+    if (state)
     {
-      returnResult = onPowerState1(deviceId, state);
+      PowerMeasureMgr_1.SetAutoRepeatCounter(MEASURE_READ_REPEAT_COUNT);
     }
-    break;
-    case 1:
+    PowerMeasureMgr_1.SetSendForced(true);
+    returnResult = doPowerMeasure(PowerMeasureMgr_1);
+  }
+  else
+  {
+    switch (devices[deviceId].index)
     {
-      returnResult = onPowerState2(deviceId, state);
+      case 0:
+      {
+        returnResult = onPowerState1(deviceId, state);
+      }
+      break;
+      case 1:
+      {
+        returnResult = onPowerState2(deviceId, state);
+      }
+      break;  
+      default:
+      {}
     }
-    break; 
-    default:
-    {}
   }
   return returnResult;
 }
 
 bool onPowerState1(const String &deviceId, bool state)
 {
-  bool returnResult = false;
+  bool switchResult = false;
+  
   if (state == true)
   {
-    returnResult = fritz.setSwitchOn(FRITZ_DEVICE_AIN_01);
+    switchResult = fritz.setSwitchOn(FRITZ_DEVICE_AIN_01);
   }
   else
   {
-    returnResult = !fritz.setSwitchOff(FRITZ_DEVICE_AIN_01);
+    switchResult = !fritz.setSwitchOff(FRITZ_DEVICE_AIN_01);
   }
-  if (returnResult == true)
+  if (switchResult == true)  // Set LED to on or off
   {
     int relayPIN = devices[deviceId].relayPIN; // get the relay pin for corresponding device
     if (relayPIN != -1)
     {
       digitalWrite(relayPIN, state);      // set the new relay state
     }
+    // RoSchmi
+    //GPIO_16_State = !GPIO_16_State;
+    //digitalWrite(GPIOPin_16, GPIO_16_State);
+
     Serial.printf("Device 1 turned %s\r\n", state ? "on" : "off");
     powerState1 = state;
     flashButtonState.actState = state;    
   }
   else
   {
-    Serial.printf("Failed to turn Device 1 %s\r\n", state ? "on" : "off");
-    //powerState1 = state;
-    //flashButtonState.actState = state;  
-  }    
-  return returnResult; // request handled properly
+    Serial.printf("Failed to turn Device 1 %s\r\n", state ? "on" : "off");   
+  }
+  bool readPowerResult = true;
+  
+  if (devices[deviceId].hasPowerMeasure)
+  { 
+     readPowerResult = doPowerMeasure(PowerMeasureMgr_1);
+     PowerMeasureMgr_1.SetSendForced(true);
+     PowerMeasureMgr_1.SetPowerMeasureState(true);
+     PowerMeasureMgr_1.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
+  }
+     
+  return switchResult && readPowerResult; // request handled properly
 }
 
 bool onPowerState2(const String &deviceId, bool state)
@@ -410,6 +549,7 @@ bool onPowerState2(const String &deviceId, bool state)
   powerState2 = state;
   return true; // request handled properly
 }
+
 
 // Create devices in Sinric Pro
 // restoreStates: true means:
@@ -426,11 +566,18 @@ void setupSinricPro(bool restoreStates)
     // we take the same callback for all and distinguish according to the index in the map    
     mySwitch.onPowerState(onPowerState);
   }
+  
+  SinricProPowerSensor &myPowerSensor = SinricPro[POWERSENSOR_ID_1];
 
+  // set callback function to device
+  myPowerSensor.onPowerState(onPowerState);
+
+  SinricPro.restoreDeviceStates(restoreStates);
+  SinricPro.onConnected([](){ Serial.printf("Connected to SinricPro\r\n"); }); 
+  SinricPro.onDisconnected([](){ Serial.printf("Disconnected from SinricPro\r\n"); });
   SinricPro.begin(APP_KEY, APP_SECRET); 
   // if true, restore the last states from the Sinric Server to this local device
   
-  SinricPro.restoreDeviceStates(restoreStates);
 }
 
 void print_reset_reason(RESET_REASON reason)
@@ -455,3 +602,5 @@ void print_reset_reason(RESET_REASON reason)
     default : Serial.println ("NO_MEAN");
   }
 }
+
+
