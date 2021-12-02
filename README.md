@@ -4,7 +4,7 @@ Controlling and monitoring of a switchable Fritz!Dect 200 power socket ( for Fri
 
 This is a more complex application which can be used to switch the power socket and read the power consumption
 
-A simple and easier to understand appliction which can only switch the Fritz!Dect 200 power socket is provided here:
+A simple and easier to understand application which can only switch the Fritz!Dect 200 power socket is provided here:
 
 https://github.com/RoSchmi/Esp32_SinricPro_FritzDect_Controller
 
