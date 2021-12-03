@@ -40,7 +40,10 @@ More configurations can be made in config.h (details are explained in config.h).
 
 The FRITZ_DEVICE_AIN can be found on your Fritz!Dect 200 powersocket
 To get the Sinric Pro Credentials have a look at:
+
 https://sinric.pro/de-index.html
+
 https://sinricpro.github.io/esp8266-esp32-sdk/index.html
+
 https://github.com/sinricpro
 
