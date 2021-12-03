@@ -1,9 +1,31 @@
-// Program 'Esp32_SinricPro_FritzDect_Controller'
+// Program 'Esp32_SinricPro_FritzDect_Switch_PowerReader'
 // Cpoyright RoSchmi 2021, License Apache 2.0
+
+// There is a less complex version which supports switching only
+// 'Esp32_SinricPro_FritzDect_Controller', consider to start with this
+// 
+// What is Sinric Pro?
+// Sinric Pro is an internet based ecosystem mainly consisting of a cloud 
+// service, Phone Apps and SDKs to run connected applications on several
+// microcontrollers and mini computers (like Esp32, Arduino, Raspberry Pi)
+// Smart home systems like Alexa or Google Home can be integrated.
+//
+// What is FritzBox and Fritz!Dect 200 switchable power socket?
+// Fritz!Dect 200 is a switchable power socket, which can be switched
+// remotely through radio transmission of the DECT telefone system 
+// integrated in FritzBox devices. FritzBox devices, produced by the
+// german company AVM, are mostly combinations of Internet Router (WLAN and
+// Ehternet) with a DECT telefone system. 'FritzBox'es are very popular in
+// Germany.
+// 
+// This App accomplishes a way to switch the power socket remotely over the
+// internet from a Sinric Pro Phone App via the Sinric Pro cloud service and the
+// FritzBox Router/DECT-Phone device. The power consumption at the socket can be 
+// measured remotely as well.
 
 // Before you can start:
 // Define WiFi-Credentials, FritzBox-Credentials and Sinric Pro Credentials
-// in file 'config_secrte.h' (take 'config_secret_template.h' as a template)
+// in file 'config_secrete.h' (take 'config_secret_template.h' as a template)
 
 // Define 'TRANSPORT_PROTOCOL' (http or https) in file config.h
 // When you begin to work with this App set TRANSPORT_PROTOCOL = 0 (http)
@@ -17,9 +39,13 @@
 // https://sinric.pro/de-index.html
 // https://sinricpro.github.io/esp8266-esp32-sdk/index.html
 // https://github.com/sinricpro
+//
+// This example is made to work with one power socket
+// If more than one power socket shall be used
+// make changes in the code where you find the comment:
+// 'Change_here_for_more_power_sockets'
 
 #include <Arduino.h>
-//#include "ESPAsyncWebServer.h"
 #include "defines.h"
 #include "config_secret.h"
 #include "config.h"
@@ -48,8 +74,6 @@
   uint16_t USER_CONFIG_ARDUINO_LOOP_STACK_SIZE = 16384;
 #endif
 
-
-
 RESET_REASON resetReason_0;
 RESET_REASON resetReason_1;
 
@@ -58,16 +82,18 @@ uint8_t lastResetCause = 0;
 const char *ssid = IOT_CONFIG_WIFI_SSID;
 const char *password = IOT_CONFIG_WIFI_PASSWORD;
 
-// if a queue should be used to store commands see:
+// if a queue should be used to store commands (not used in this App) see:
 //https://techtutorialsx.com/2017/08/20/esp32-arduino-freertos-queues/
 
-// Create more powerstate flags if needed
+// Represents the On/Off states of switchable sockets
+// Change_here_for_more_power_sockets
 bool powerState1 = false;
 bool powerState2 = false;
 
-// Create more instances if needed
+// Class to accomplish reading of power consumption of sockets (here 2 sockets)
+// Change_here_for_more_power_sockets
 RsPowerMeasureMgr PowerMeasureMgr_1(POWERSENSOR_ID_1, FRITZ_DEVICE_AIN_01, SWITCH_READ_REPEAT_COUNT, POWER_MEASURE_READINTERVAL_MS);
-RsPowerMeasureMgr PowerMeasureMgr_2(POWERSENSOR_ID_2, FRITZ_DEVICE_AIN_02, SWITCH_READ_REPEAT_COUNT, POWER_MEASURE_READINTERVAL_MS);
+//RsPowerMeasureMgr PowerMeasureMgr_2(POWERSENSOR_ID_2, FRITZ_DEVICE_AIN_02, SWITCH_READ_REPEAT_COUNT, POWER_MEASURE_READINTERVAL_MS);
 
 typedef struct
 {
@@ -76,7 +102,7 @@ typedef struct
 }ButtonState;
 
 //RoSchmi
-#define GPIOPin_16 16    // for debugging
+#define GPIOPin_16 16    // only used for debugging
 #define GPIOPin 0
 #define BUTTON_1 GPIOPin
 #define BUTTON_2 GPIOPin
@@ -103,13 +129,14 @@ typedef struct
 } deviceConfig_t;
 
 // Sinric Pro
-// this is the main configuration
+// this is the main configuration of switches
 // please put in your deviceId, the PIN for Relay the PIN for flipSwitch, a flag if powerMeasure available
-//  and an index to address the entry
-// this can be up to N devices...depending on how much pin's available on your device ;)
+// and an index to address the entry
+// this can be up to N devices...depending on available power sockets and pins on the Esp32)
 // right now we have 2 devicesIds going to 1 LED and 2 flip switches (set to the same button)
 // set the LED to -1 for none
 
+// Change_here_for_more_power_sockets
 std::map<String, deviceConfig_t> devices =
 {
   //{deviceId, {relayPIN,  flipSwitchPIN, measure flag, index}}
@@ -120,12 +147,9 @@ std::map<String, deviceConfig_t> devices =
   { SWITCH_ID_2, {  (int)-1, (int)BUTTON_2, false, 1}}
 };
 
-//size_t switchCount = devices.size();
-
 uint32_t millisAtLastFritzConnectTest;
 uint32_t millisBetwFritzConnectTests = 10000;
 
-//X509Certificate myX509Certificate = baltimore_root_ca;
 X509Certificate myX509Certificate = myfritzbox_root_ca;
 
 #if TRANSPORT_PROTOCOL == 1
@@ -143,92 +167,15 @@ uint64_t loopCounter = 0;
 String fritz_SID = "";
 FritzApi fritz((char *)FRITZ_USER, (char *)FRITZ_PASSWORD, FRITZ_IP_ADDRESS, protocol, wifi_client, httpPtr, myX509Certificate);
 
-// not used
-void GPIOPinISR()
-{
-  buttonPressed = true;
-}
+// forward declaration
+bool sendThisPowerSensorData(RsPowerMeasureMgr &powerMeasureMgr);
 
-// this is where you read from power sensor
-bool doPowerMeasure(RsPowerMeasureMgr &actPowerMeasure) { 
-  if (actPowerMeasure.isActive())
-  {
-    actPowerMeasure.SetPower((float)fritz.getSwitchPower(actPowerMeasure.GetFritzDevice_AIN()));
-  }
-  else
-  {
-    actPowerMeasure.SetPower(nanf(""));
-  }
-  return true;
-}
-
-bool sendThisPowerSensorData(RsPowerMeasureMgr &powerMeasureMgr) 
-{ 
-  bool powerMeasureStateToggled = false;
-  if (!powerMeasureMgr.isSendForced())  // send if forced in any case
-  {
-    // dont send data if device is turned off or if powerMeasure is off
-    if (!(powerMeasureMgr.isActive() && powerMeasureMgr.GetPowerMeasureState()))
-    {
-      return false; 
-    }
-    // only send if sendinterval has elapsed
-    if ((millis() - powerMeasureMgr.GetLastSendTimeMs()) < powerMeasureMgr.GetSendIntervalMs()) 
-    {
-      return false; 
-    }
-  }
-  // Will be sent to Sinric Pro server
-  powerMeasureMgr.SetSendForced(false);
-  if (powerMeasureMgr.isAutoRepeatEnabled())
-  {    
-    powerMeasureMgr.DecrementAutoRepeatCounter(1000);
-    // RoSchmi
-    Serial.println("RepeatCounter");
-    Serial.println(powerMeasureMgr.GetAutoRepeatCounter());
-    if (powerMeasureMgr.GetAutoRepeatCounter() <= 0)
-    {
-      powerMeasureMgr.SetPowerMeasureState(false);
-      powerMeasureStateToggled = true;
-      powerMeasureMgr.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
-      Serial.println("RepeatCounter was Null");
-    }
-  }
-  else
-  {
-    powerMeasureMgr.SetSendForced(false);
-    powerMeasureMgr.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
-  }
-  
-  powerMeasureMgr.SetLastSendTimeMs(millis());
-  
-  // send measured data
-  SinricProPowerSensor &myPowerSensor = SinricPro[powerMeasureMgr.GetPowerSensor_ID()];
-  powerMeasure myPowerMeasure = powerMeasureMgr.GetPowerValues();
-
-  Serial.println("sendPowerSensorEvent happend");
-  // RoSchmi
-  GPIO_16_State = !GPIO_16_State;
-  digitalWrite(GPIOPin_16, GPIO_16_State);
-
-  Serial.println(myPowerMeasure.power);
-  
-  if (powerMeasureStateToggled)
-  {
-    myPowerSensor.sendPowerStateEvent(false);
-  }
-  
-  bool success = myPowerSensor.sendPowerSensorEvent(myPowerMeasure.voltage, myPowerMeasure.current, myPowerMeasure.power);
-  if (success) { 
-    doPowerMeasure(powerMeasureMgr); }
-  return success;
-}
 
 bool sendPowerSensorData() {
   bool returnResult = false;
-  // Add more 
+  // Change_here_for_more_power_sockets
   returnResult = returnResult || sendThisPowerSensorData(PowerMeasureMgr_1);
-  returnResult = returnResult || sendThisPowerSensorData(PowerMeasureMgr_2);
+  //returnResult = returnResult || sendThisPowerSensorData(PowerMeasureMgr_2);
   return returnResult;
 }
 
@@ -276,8 +223,7 @@ void setup()
   Serial.print(BOARD_NAME);
   Serial.print(F(" with "));
   Serial.println(SHIELD_TYPE); 
-  //Serial.println(WIFI_WEBSERVER_VERSION);
-
+  
   // Wait some time (3000 ms)
   start = millis();
   while ((millis() - start) < 3000)
@@ -301,8 +247,6 @@ void setup()
 
   //https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/wdts.html
   #endif 
-
-
 
   //Set WiFi to station mode and disconnect from an AP if it was previously connected
   WiFi.mode(WIFI_STA);
@@ -371,19 +315,14 @@ void setup()
   // if true: when the device connects to the server the sever will
   // send the last states of the switch to the device
   // if false: the device will actualize the server to the state just beeing present on the device
-  
   bool restoreStatesFromServer = false;
   setupSinricPro(restoreStatesFromServer);
 
   delay(1000);
 
-  //SinricProPowerSensor &myPowerSensor = SinricPro[POWERSENSOR_ID_1];
-
-  // set callback function to device
-  //myPowerSensor.onPowerState(onPowerState);
-
   if (!restoreStatesFromServer)
-  { 
+  {
+    // Change_here_for_more_power_sockets 
     bool actualSocketState = fritz.getSwitchState(FRITZ_DEVICE_AIN_01);
     
     onPowerState1(SWITCH_ID_1, actualSocketState);  // once more switch Fritz!Dect socket to actual state  
@@ -392,14 +331,14 @@ void setup()
     SinricProSwitch& mySwitch = SinricPro[SWITCH_ID_1];
     // send powerstate event      
     mySwitch.sendPowerStateEvent(actualSocketState); // send the actual powerState to SinricPro server
-    Serial.println("State from Fritz!Dect was transmitted to server"); 
+    Serial.println("PowerState of Fritz!Dect transmitted to server"); 
   }
   
   // Set time interval for repeating commands
   millisAtLastFritzConnectTest = millis();
   millisBetwFritzConnectTests = 60 * 1000;  //to refresh fritz_SID every minute
 
-  Serial.println("Ended Setup");
+  //Serial.println("Setup ended");
 }
 
 void loop() 
@@ -428,13 +367,94 @@ void loop()
           delay(10 * 1000); // 10 seconds
           ESP.restart();  
         }
-     }
-     //String switchname = fritz.getSwitchName(FRITZ_DEVICE_AIN_01); 
-     //Serial.printf("Name of device is: %s", switchname.c_str());
+     }     
   }
   SinricPro.handle();
   sendPowerSensorData();
   handleButtonPress();
+}
+
+// not used
+void GPIOPinISR()
+{
+  buttonPressed = true;
+}
+
+// this is where you read from power sensor
+bool doPowerMeasure(RsPowerMeasureMgr &actPowerMeasure) { 
+  if (actPowerMeasure.isActive())
+  {
+    actPowerMeasure.SetPower((float)fritz.getSwitchPower(actPowerMeasure.GetFritzDevice_AIN()));
+  }
+  else
+  {
+    actPowerMeasure.SetPower(nanf(""));
+  }
+  return true;
+}
+
+bool sendThisPowerSensorData(RsPowerMeasureMgr &powerMeasureMgr) 
+{ 
+  bool powerMeasureStateToggled = false;
+  if (!powerMeasureMgr.isSendForced())  // send if forced in any case
+  {
+    // dont send data if device is turned off or if powerMeasure is off
+    if (!(powerMeasureMgr.isActive() && powerMeasureMgr.GetPowerMeasureState()))
+    {
+      return false; 
+    }
+    // only send if sendinterval has elapsed
+    if ((millis() - powerMeasureMgr.GetLastSendTimeMs()) < powerMeasureMgr.GetSendIntervalMs()) 
+    {
+      return false; 
+    }
+  }
+  // Will be sent to Sinric Pro server
+  powerMeasureMgr.SetSendForced(false);
+  if (powerMeasureMgr.isAutoRepeatEnabled())
+  {    
+    powerMeasureMgr.DecrementAutoRepeatCounter(1000);
+    // RoSchmi
+    Serial.printf("RepeatCounter: %d\r\n", powerMeasureMgr.GetAutoRepeatCounter());
+    //Serial.println(powerMeasureMgr.GetAutoRepeatCounter());
+    if (powerMeasureMgr.GetAutoRepeatCounter() <= 0)
+    {
+      powerMeasureMgr.SetPowerMeasureState(false);
+      powerMeasureStateToggled = true;
+      powerMeasureMgr.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
+      Serial.println("RepeatCounter was 0, stopping to repeat");
+    }
+  }
+  else
+  {
+    powerMeasureMgr.SetSendForced(false);
+    powerMeasureMgr.SetAutoRepeatCounter(SWITCH_READ_REPEAT_COUNT);
+  }
+  
+  powerMeasureMgr.SetLastSendTimeMs(millis());
+  
+  // send measured data
+  SinricProPowerSensor &myPowerSensor = SinricPro[powerMeasureMgr.GetPowerSensor_ID()];
+  powerMeasure myPowerMeasure = powerMeasureMgr.GetPowerValues();
+
+  //Serial.println("sendPowerSensorEvent. Repeatcounter: %d\r\n", 
+  
+  Serial.println("sendPowerSensorEvent");
+  // RoSchmi: toggle GPIO_16 (for debugging)
+  GPIO_16_State = !GPIO_16_State;
+  digitalWrite(GPIOPin_16, GPIO_16_State);
+
+  //Serial.println(myPowerMeasure.power);
+  
+  if (powerMeasureStateToggled)
+  {
+    myPowerSensor.sendPowerStateEvent(false);
+  }
+  
+  bool success = myPowerSensor.sendPowerSensorEvent(myPowerMeasure.voltage, myPowerMeasure.current, myPowerMeasure.power);
+  if (success) { 
+    doPowerMeasure(powerMeasureMgr); }
+  return success;
 }
 
 void handleButtonPress()
@@ -451,7 +471,7 @@ void handleButtonPress()
         SinricProSwitch& mySwitch = SinricPro[SWITCH_ID_1];
         // send powerstate event      
         mySwitch.sendPowerStateEvent(powerState1); // send the new powerState to SinricPro server
-        Serial.println("(Switched manually via flashbutton)");        
+        //Serial.println("(Switched manually via flashbutton)");        
       }    
     }     
   }
@@ -461,13 +481,11 @@ void handleButtonPress()
   }
 }
 
-
 bool onPowerState(String deviceId, bool &state)
 {
   bool returnResult = false;
-  Serial.println( String(deviceId) + String(state ? " on" : " off"));
+  //Serial.println( String(deviceId) + String(state ? " on" : " off"));
   
- 
   if (deviceId == POWERSENSOR_ID_1)
   {
     PowerMeasureMgr_1.SetPowerMeasureState(state);
@@ -518,10 +536,7 @@ bool onPowerState1(const String &deviceId, bool state)
     {
       digitalWrite(relayPIN, state);      // set the new relay state
     }
-    // RoSchmi
-    //GPIO_16_State = !GPIO_16_State;
-    //digitalWrite(GPIOPin_16, GPIO_16_State);
-
+  
     Serial.printf("Device 1 turned %s\r\n", state ? "on" : "off");
     powerState1 = state;
     flashButtonState.actState = state;    
@@ -566,7 +581,7 @@ void setupSinricPro(bool restoreStates)
     // we take the same callback for all and distinguish according to the index in the map    
     mySwitch.onPowerState(onPowerState);
   }
-  
+  // Change_here_for_more_power_sockets
   SinricProPowerSensor &myPowerSensor = SinricPro[POWERSENSOR_ID_1];
 
   // set callback function to device
