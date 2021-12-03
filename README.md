@@ -11,8 +11,7 @@ A simple and easier to understand application which can only switch the Fritz!De
 https://github.com/RoSchmi/Esp32_SinricPro_FritzDect_Controller
 
 ### What is Sinric Pro?
-Sinric Pro is an internet based ecosystem mainly consisting of a cloud 
-service, Phone Apps and SDKs to run connected applications on different
+Sinric Pro is an internet based ecosystem mainly consisting of a of an internet portal, a cloud service, mobile Apps and SDKs to run connected applications on different
 microcontrollers and mini computers (like Esp32, Arduino, Raspberry Pi)
 Smart home systems like Alexa or Google Home can be integrated.
 
